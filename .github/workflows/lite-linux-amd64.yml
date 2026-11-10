@@ -67,7 +67,7 @@ jobs:
           # sqlite-vec's cgo bindings #include "sqlite3.h"; only declarations
           # are needed here (the symbols come from mattn/go-sqlite3's
           # amalgamation at link time), so the distro header is enough.
-          CGO_CFLAGS: "-O2 -I/home/runner/sqlite-include"
+          CGO_CFLAGS: "-O2 -I/home/runner/sqlite-include -D_GNU_SOURCE -include sys/types.h"
         run: |
           set -eux
           SHA=$(git rev-parse --short HEAD)
