@@ -3,15 +3,16 @@ name: lite-linux-amd64
 # One-off build of WeKnora Lite as a *statically linked* linux/amd64 binary,
 # packaged in the layout the TMAgentSpace docker build wants.
 #
-# Why static musl: the target runtime is Huawei Cloud EulerOS 2.0 (glibc 2.34).
-# A default cgo build on ubuntu-latest (glibc 2.39) produces a binary that
-# references __isoc23_* / newer GLIBC_* symbols and dies at exec time on the
-# older runtime. zig (as the C compiler) + musl gives a self-contained ELF.
+# Why static: the target runtime is Huawei Cloud EulerOS 2.0 (glibc 2.34). A
+# normal cgo build on ubuntu-latest references GLIBC_2.38 / __isoc23_* and
+# dies at exec time on the older runtime (measured: 2026-11-10).
+# Go's osusergo/netgo tags + -extldflags -static remove the need for the
+# target's glibc/NSS entirely.
 #
-# Why CI at all: cross-compiling CGO for linux from the Windows laptop fails
-# (Go toolchain crashes in CreateProcess under that host's EDR), and the
-# repo's own release-lite.yml pins GOTOOLCHAIN=local with Go 1.24, which
-# cannot satisfy go.mod's go 1.26.0.
+# Why CI: cross-compiling CGO for linux from the Windows laptop fails (the Go
+# toolchain crashes in CreateProcess under that host's EDR), and the repo's
+# release-lite.yml pins GOTOOLCHAIN=local with Go 1.24, which cannot satisfy
+# go.mod's go 1.26.0.
 
 on:
   workflow_dispatch:
@@ -44,30 +45,14 @@ jobs:
           npm ci
           npm run build
 
-      - name: Install zig (static musl C toolchain) and sqlite headers
+      - name: Install sqlite headers (sqlite-vec cgo needs sqlite3.h)
         run: |
           set -eux
           sudo apt-get update
           sudo apt-get install -y libsqlite3-dev
-          # Keep the distro sqlite headers OUT of the musl sysroot: copy the
-          # two headers into a private include dir instead of -I/usr/include
-          # (which would drag glibc's bits/* headers into a musl compile).
-          mkdir -p /home/runner/sqlite-include
-          cp /usr/include/sqlite3.h /home/runner/sqlite-include/
-          cp /usr/include/sqlite3ext.h /home/runner/sqlite-include/ 2>/dev/null || true
-          ls -la /home/runner/sqlite-include/
-          curl -fsSL --retry 3 -o zig.tar.xz https://ziglang.org/download/0.17.1/zig-x86_64-linux-0.17.1.tar.xz
-          tar xf zig.tar.xz
-          mv zig-x86_64-linux-0.17.1 zig
-          ./zig/zig version
+          ls -la /usr/include/sqlite3.h
 
-      - name: Build Lite binary (linux/amd64, static musl, cgo)
-        env:
-          CC: "/home/runner/work/WeKnora/WeKnora/zig/zig cc -target x86_64-linux-musl"
-          # sqlite-vec's cgo bindings #include "sqlite3.h"; only declarations
-          # are needed here (the symbols come from mattn/go-sqlite3's
-          # amalgamation at link time), so the distro header is enough.
-          CGO_CFLAGS: "-O2 -I/home/runner/sqlite-include -D_GNU_SOURCE -include sys/types.h"
+      - name: Build Lite binary (linux/amd64, static, cgo)
         run: |
           set -eux
           SHA=$(git rev-parse --short HEAD)
@@ -80,7 +65,7 @@ jobs:
             -X=github.com/Tencent/WeKnora/internal/handler.BuildTime=${BUILT_AT} \
             -X=github.com/Tencent/WeKnora/internal/handler.GoVersion=${GOVER} \
             -linkmode=external -extldflags=-static"
-          go build -tags "sqlite_fts5" -trimpath -buildvcs=false -ldflags "${LDFLAGS}" -o WeKnora-lite ./cmd/server
+          go build -tags "sqlite_fts5 netgo osusergo" -trimpath -buildvcs=false -ldflags "${LDFLAGS}" -o WeKnora-lite ./cmd/server
           file WeKnora-lite
           ls -la WeKnora-lite
           sha256sum WeKnora-lite
