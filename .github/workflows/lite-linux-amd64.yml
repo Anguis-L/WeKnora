@@ -1,0 +1,80 @@
+name: lite-linux-amd64
+
+# One-off build of the WeKnora Lite single binary for linux/amd64, packaged in
+# the exact layout the TMAgentSpace docker build wants (binary + web/ +
+# config/ + migrations/sqlite + .env.lite.example).
+#
+# Why this exists: cross-compiling CGO for linux from a Windows laptop fails
+# (the Go toolchain crashes in CreateProcess under this host's EDR). A native
+# Linux runner is the reliable builder; the repo's own release-lite.yml pins
+# GOTOOLCHAIN=local with Go 1.24, which cannot satisfy go.mod's go 1.26.0.
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    env:
+      CGO_ENABLED: "1"
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.26.10"
+          cache: true
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Build frontend
+        working-directory: frontend
+        run: |
+          npm ci
+          npm run build
+
+      - name: Build Lite binary (linux/amd64, cgo, sqlite_fts5)
+        run: |
+          set -eux
+          SHA=$(git rev-parse --short HEAD)
+          BUILT_AT=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+          GOVER=$(go version | awk '{print $3}')
+          LDFLAGS="-w -s \
+            -X=github.com/Tencent/WeKnora/internal/handler.Version=0.9.0 \
+            -X=github.com/Tencent/WeKnora/internal/handler.Edition=lite \
+            -X=github.com/Tencent/WeKnora/internal/handler.CommitID=${SHA} \
+            -X=github.com/Tencent/WeKnora/internal/handler.BuildTime=${BUILT_AT} \
+            -X=github.com/Tencent/WeKnora/internal/handler.GoVersion=${GOVER}"
+          go build -tags "sqlite_fts5" -trimpath -buildvcs=false -ldflags "${LDFLAGS}" -o WeKnora-lite ./cmd/server
+          file WeKnora-lite || true
+          ls -la WeKnora-lite
+          sha256sum WeKnora-lite
+
+      - name: Package artifact
+        run: |
+          set -eux
+          rm -rf pkg
+          mkdir -p pkg/web pkg/migrations/sqlite
+          cp WeKnora-lite pkg/
+          cp -r frontend/dist/* pkg/web/
+          cp -r config pkg/config
+          if [ -d config ]; then cp -r config pkg/config; fi
+          cp -r migrations/sqlite/* pkg/migrations/sqlite/
+          cp .env.lite.example pkg/
+          cp docs/LITE.md pkg/README.md || true
+          tar czf weknora-lite-linux-amd64.tar.gz -C pkg .
+          ls -la
+          du -h weknora-lite-linux-amd64.tar.gz
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: weknora-lite-linux-amd64
+          path: weknora-lite-linux-amd64.tar.gz
+          retention-days: 3
