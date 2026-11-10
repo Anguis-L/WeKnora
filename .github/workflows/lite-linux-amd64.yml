@@ -1,13 +1,17 @@
 name: lite-linux-amd64
 
-# One-off build of the WeKnora Lite single binary for linux/amd64, packaged in
-# the exact layout the TMAgentSpace docker build wants (binary + web/ +
-# config/ + migrations/sqlite + .env.lite.example).
+# One-off build of WeKnora Lite as a *statically linked* linux/amd64 binary,
+# packaged in the layout the TMAgentSpace docker build wants.
 #
-# Why this exists: cross-compiling CGO for linux from a Windows laptop fails
-# (the Go toolchain crashes in CreateProcess under this host's EDR). A native
-# Linux runner is the reliable builder; the repo's own release-lite.yml pins
-# GOTOOLCHAIN=local with Go 1.24, which cannot satisfy go.mod's go 1.26.0.
+# Why static musl: the target runtime is Huawei Cloud EulerOS 2.0 (glibc 2.34).
+# A default cgo build on ubuntu-latest (glibc 2.39) produces a binary that
+# references __isoc23_* / newer GLIBC_* symbols and dies at exec time on the
+# older runtime. zig (as the C compiler) + musl gives a self-contained ELF.
+#
+# Why CI at all: cross-compiling CGO for linux from the Windows laptop fails
+# (Go toolchain crashes in CreateProcess under that host's EDR), and the
+# repo's own release-lite.yml pins GOTOOLCHAIN=local with Go 1.24, which
+# cannot satisfy go.mod's go 1.26.0.
 
 on:
   workflow_dispatch:
@@ -40,7 +44,17 @@ jobs:
           npm ci
           npm run build
 
-      - name: Build Lite binary (linux/amd64, cgo, sqlite_fts5)
+      - name: Install zig (static musl C toolchain)
+        run: |
+          set -eux
+          curl -fsSL --retry 3 -o zig.tar.xz https://ziglang.org/download/0.17.1/zig-x86_64-linux-0.17.1.tar.xz
+          tar xf zig.tar.xz
+          mv zig-x86_64-linux-0.17.1 zig
+          ./zig/zig version
+
+      - name: Build Lite binary (linux/amd64, static musl, cgo)
+        env:
+          CC: "/home/runner/work/WeKnora/WeKnora/zig/zig cc -target x86_64-linux-musl"
         run: |
           set -eux
           SHA=$(git rev-parse --short HEAD)
@@ -51,9 +65,10 @@ jobs:
             -X=github.com/Tencent/WeKnora/internal/handler.Edition=lite \
             -X=github.com/Tencent/WeKnora/internal/handler.CommitID=${SHA} \
             -X=github.com/Tencent/WeKnora/internal/handler.BuildTime=${BUILT_AT} \
-            -X=github.com/Tencent/WeKnora/internal/handler.GoVersion=${GOVER}"
+            -X=github.com/Tencent/WeKnora/internal/handler.GoVersion=${GOVER} \
+            -linkmode=external -extldflags=-static"
           go build -tags "sqlite_fts5" -trimpath -buildvcs=false -ldflags "${LDFLAGS}" -o WeKnora-lite ./cmd/server
-          file WeKnora-lite || true
+          file WeKnora-lite
           ls -la WeKnora-lite
           sha256sum WeKnora-lite
 
@@ -65,7 +80,6 @@ jobs:
           cp WeKnora-lite pkg/
           cp -r frontend/dist/* pkg/web/
           cp -r config pkg/config
-          if [ -d config ]; then cp -r config pkg/config; fi
           cp -r migrations/sqlite/* pkg/migrations/sqlite/
           cp .env.lite.example pkg/
           cp docs/LITE.md pkg/README.md || true
